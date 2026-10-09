@@ -25,6 +25,7 @@ class TerminalTheme {
     required this.searchHitBackground,
     required this.searchHitBackgroundCurrent,
     required this.searchHitForeground,
+    this.minimumContrastRatio = 1,
   });
 
   final Color cursor;
@@ -54,4 +55,11 @@ class TerminalTheme {
   final Color searchHitBackground;
   final Color searchHitBackgroundCurrent;
   final Color searchHitForeground;
+
+  /// The minimum WCAG contrast ratio between glyph colors and the cell
+  /// background they are drawn on, from 1 (off) to 21. Glyph colors below it
+  /// are lightened or darkened at draw time, keeping their hue; faint text
+  /// targets a third less. Backgrounds, cursor, selection and search-hit
+  /// colors are not adjusted.
+  final double minimumContrastRatio;
 }

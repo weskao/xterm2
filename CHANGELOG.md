@@ -1,3 +1,7 @@
+## [Unreleased]
+
+* Add `TerminalTheme.minimumContrastRatio` to keep glyph colors readable against their cell backgrounds.
+
 ## [5.3.0] - 2026-07-28
 
 * Render bounded search matches with a distinct active result.

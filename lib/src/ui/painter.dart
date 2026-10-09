@@ -14,6 +14,7 @@ const _specialBlinkColor = 2;
 const _specialReverseColor = 3;
 const _specialItalicColor = 4;
 const _defaultParagraphCacheSize = 2048;
+const _maxContrastColorCacheSize = 4096;
 
 bool _isSymbolLike(int codePoint) {
   return switch (codePoint) {
@@ -69,6 +70,10 @@ class TerminalPainter {
   final Map<int, Color> _indexedColorOverrides = {};
   final Map<int, Color> _specialColorOverrides = {};
 
+  /// Glyph colors adjusted for [TerminalTheme.minimumContrastRatio], keyed by
+  /// (foreground, background, faint). Cleared when the theme changes.
+  final Map<(Color, Color, bool), Color> _contrastColors = {};
+
   int _colorRevision = -1;
 
   Object? _colorSource;
@@ -107,6 +112,7 @@ class TerminalPainter {
     if (value == _theme) return;
     _theme = value;
     _colorPalette = PaletteBuilder(value).build();
+    _contrastColors.clear();
     _paragraphCache.clear();
   }
 
@@ -502,6 +508,9 @@ class TerminalPainter {
           cellData,
           foregroundOverride: foregroundOverride,
         ),
+      false
+          when foregroundOverride == null && _theme.minimumContrastRatio > 1 =>
+        _resolveMinimumContrastForegroundColor(cellData),
       false => resolveCellForegroundColor(
           cellData,
           foregroundOverride: foregroundOverride,
@@ -988,10 +997,44 @@ class TerminalPainter {
     };
   }
 
-  Color _resolveLogicalForegroundColor(CellData cellData) {
+  Color _resolveMinimumContrastForegroundColor(CellData cellData) {
+    final background = resolveCellBackgroundColor(cellData) ?? backgroundColor;
+    final inverse =
+        (cellData.flags & CellFlags.inverse != 0) != _reverseDisplay;
+    final faint = !inverse && cellData.flags & CellFlags.faint != 0;
+    final foreground = switch (faint) {
+      // Blend toward the background: the channel-scaling dim would make faint
+      // text darker, not dimmer, on light backgrounds.
+      true => Color.lerp(
+          _resolveUndimmedForegroundColor(cellData),
+          background,
+          0.5,
+        )!,
+      false => resolveCellForegroundColor(cellData),
+    };
+    if (_contrastColors.length > _maxContrastColorCacheSize) {
+      _contrastColors.clear();
+    }
+    final ratio = _theme.minimumContrastRatio;
+    return _contrastColors[(foreground, background, faint)] ??=
+        ensureContrastRatio(
+      foreground,
+      background,
+      switch (faint) {
+        true => ratio / 1.5,
+        false => ratio,
+      },
+    );
+  }
+
+  Color _resolveUndimmedForegroundColor(CellData cellData) {
     final specialColor = _attributeForegroundColor(cellData.flags);
-    final color =
-        specialColor ?? resolveForegroundColor(_boldBrightForeground(cellData));
+    return specialColor ??
+        resolveForegroundColor(_boldBrightForeground(cellData));
+  }
+
+  Color _resolveLogicalForegroundColor(CellData cellData) {
+    final color = _resolveUndimmedForegroundColor(cellData);
     if (cellData.flags & CellFlags.faint == 0) return color;
     return color.withValues(
       red: color.r * _dimColorFactor,
@@ -1122,4 +1165,56 @@ double _contrastRatio(Color first, Color second) {
   final lighter = max(firstLuminance, secondLuminance);
   final darker = min(firstLuminance, secondLuminance);
   return (lighter + 0.05) / (darker + 0.05);
+}
+
+/// Returns [foreground] when its contrast against [background] is at least
+/// [ratio]. Otherwise scales its channels toward black (on light backgrounds)
+/// or white (on dark ones) just far enough to reach [ratio], keeping hue and
+/// alpha. When that side cannot reach it, the other side is tried and the
+/// higher-contrast result wins.
+Color ensureContrastRatio(Color foreground, Color background, double ratio) {
+  if (_contrastRatio(foreground, background) >= ratio) return foreground;
+
+  final darken = background.computeLuminance() > 0.5;
+  final preferred = _scaleToContrast(foreground, background, ratio, darken);
+  final preferredRatio = _contrastRatio(preferred, background);
+  if (preferredRatio >= ratio) return preferred;
+
+  final other = _scaleToContrast(foreground, background, ratio, !darken);
+  return switch (_contrastRatio(other, background) > preferredRatio) {
+    true => other,
+    false => preferred,
+  };
+}
+
+/// Binary-searches the smallest move of [color] toward black ([darken]) or
+/// white that meets [ratio], or returns the extreme when none does.
+Color _scaleToContrast(
+  Color color,
+  Color background,
+  double ratio,
+  bool darken,
+) {
+  // Rounded to 8-bit channels so the painted color still meets the ratio.
+  double channel(double value, double t) =>
+      ((darken ? value * (1 - t) : value + (1 - value) * t) * 255).round() /
+      255;
+  Color scaled(double t) => color.withValues(
+        red: channel(color.r, t),
+        green: channel(color.g, t),
+        blue: channel(color.b, t),
+      );
+
+  var low = 0.0;
+  var high = 1.0;
+  if (_contrastRatio(scaled(high), background) < ratio) return scaled(high);
+  for (var i = 0; i < 16; i++) {
+    final mid = (low + high) / 2;
+    if (_contrastRatio(scaled(mid), background) >= ratio) {
+      high = mid;
+    } else {
+      low = mid;
+    }
+  }
+  return scaled(high);
 }
